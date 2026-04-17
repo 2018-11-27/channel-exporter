@@ -3,11 +3,11 @@ from typing import Optional
 
 
 def __init__(
-        syscode,                            # type: str
-        inner_metrics_buckets       =None,  # type: Optional[tuple[int, ...]]
-        partner_http_metrics_buckets=None,  # type: Optional[tuple[int, ...]]
-        consumer_metrics_buckets    =None,  # type: Optional[tuple[int, ...]]
-        default_metrics_port        =None   # type: Optional[int]
+        syscode,                        # type: str
+        inner_metrics_buckets   =None,  # type: Optional[tuple[int, ...]]
+        external_metrics_buckets=None,  # type: Optional[tuple[int, ...]]
+        consumer_metrics_buckets=None,  # type: Optional[tuple[int, ...]]
+        default_metrics_port    =None   # type: Optional[int]
 ):
     """
     初始化监控配置。
@@ -21,9 +21,9 @@ def __init__(
         1500, 2000, 2500, 3000, 4000, 5000, 6000, 8000]。需按升序排列，用于统计请求
         耗时分位分布。
 
-    @param partner_http_metrics_buckets:
-        合作商接口调用指标直方图桶配置，单位毫秒。默认值同参数 `inner_metrics_buckets`，
-        用于统计第三方接口调用耗时分位分布。
+    @param external_metrics_buckets:
+        外部接口调用指标直方图桶配置，单位毫秒。默认值同参数 `inner_metrics_buckets`，
+        用于统计外部接口和第三方接口调用耗时分位分布。
 
     @param consumer_metrics_buckets:
         消息队列消费者指标直方图桶配置，单位毫秒。默认值同参数 `inner_metrics_buckets`，
@@ -31,8 +31,8 @@ def __init__(
 
     @param default_metrics_port:
         Prometheus metrics 端点暴露端口，默认为 9166。如果启动了 Flask 服务器，则使用
-        Flask 服务器端点。如果你的运行环境安装了 Flask 库但未使用或启动它，则默认端点将在
-        延迟 40 秒后启动。
+        Flask 服务器端点。如果你的运行环境安装了 Flask 库但未使用或启动它，默认端点将在延
+        迟 40 秒后静默启动。
     """
 
 
