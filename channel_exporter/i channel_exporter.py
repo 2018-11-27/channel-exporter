@@ -3,7 +3,8 @@ import os
 import re
 import sys
 import time
-import json
+import json as jsonx
+import warnings
 import functools
 import traceback
 import threading
@@ -82,11 +83,14 @@ this = sys.modules[__name__]
 
 default_buckets = (100, 200, 500, 800, 1000, 1500, 2000, 2500, 3000, 4000, 5000, 6000, 8000)
 
+deprecated = object()
+
 
 def __init__(
         syscode,
         inner_metrics_buckets=default_buckets,
-        partner_http_metrics_buckets=default_buckets,
+        partner_http_metrics_buckets=deprecated,
+        external_metrics_buckets=None,
         consumer_metrics_buckets=default_buckets,
         default_metrics_port=9166,
 ):
@@ -95,6 +99,14 @@ def __init__(
 
     if re.match(r'[a-zA-Z]\d{9}$', syscode) is None:
         raise ValueError('parameter syscode "%s" is illegal.' % syscode)
+
+    if partner_http_metrics_buckets is not deprecated:
+        warnings.warn(
+            'parameter "partner_http_metrics_buckets" will be deprecated soon, replaced to "external_metrics_buckets".',
+            category=DeprecationWarning, stacklevel=2
+        )
+        if external_metrics_buckets is None:
+            external_metrics_buckets = partner_http_metrics_buckets
 
     this.syscode = syscode = syscode.upper()
     this.appid = syscode[:4]
@@ -114,12 +126,23 @@ def __init__(
         prometheus_client.start_http_server(int(default_metrics_port))
 
     if requests is not None:
-        requests.Session.request = partner_http_metrics(requests.Session.request)
+        requests.Session.request = http_request_metrics(requests.Session.request)
         this.metrics_partner_http = prometheus_client.Histogram(
             name='partner_http_metrics',
             documentation='...',
             labelnames=('appid', 'application', 'partner', 'action_code', 'http_status', 'code'),
-            buckets=partner_http_metrics_buckets
+            buckets=external_metrics_buckets or default_buckets
+        )
+        this.external_calls_total = prometheus_client.Counter(
+            name='external_calls_total',
+            documentation='Total number of external calls',
+            labelnames=('call_type', 'tcode', 'method_code', 'status')
+        )
+        this.external_call_duration_seconds = prometheus_client.Histogram(
+            name='external_call_duration_seconds',
+            documentation='Duration of external calls in seconds',
+            labelnames=('call_type', 'tcode', 'method_code', 'status'),
+            buckets=tuple(v * 0.001 for v in external_metrics_buckets or default_buckets)
         )
 
     if Consumer is not None:
@@ -134,7 +157,7 @@ def __init__(
 
 def start_prometheus_metrics_server(port):
     start = time.time()
-    while time.time() - start < 40:
+    while time.time() - start < 3:
         if hasattr(Flask, '__running__') or hasattr(WSGIServer, '__running__'):
             return
         time.sleep(.01)
@@ -160,7 +183,7 @@ def inner_metrics_before():
             else:
                 request_body = request.data
                 try:
-                    request_data = json.loads(request_body) if request_body else None
+                    request_data = jsonx.loads(request_body) if request_body else None
                 except ValueError:
                     request_data = None
             g.__request_data__ = request_data
@@ -191,7 +214,7 @@ def inner_metrics(response):
             or FuzzyGet(g.__request_data__, 'method_code').v
         )
         try:
-            response_data = json.loads(response.get_data())
+            response_data = jsonx.loads(response.get_data())
         except ValueError:
             code = -1
         else:
@@ -221,44 +244,67 @@ def metrics():
     return Response(prometheus_client.generate_latest(), mimetype=prometheus_client.CONTENT_TYPE_LATEST)
 
 
-def partner_http_metrics(func):
+def http_request_metrics(func):
 
     @functools.wraps(func)
-    def inner(self, method, url, *a, **kw):
+    def inner(self, method, url, headers=None, params=None, data=None, json=None, **kw):
         request_time = datetime.now()
-        response = func(self, method, url, *a, **kw)
+        response = func(self, method, url, headers=headers, params=params, data=data, json=json, **kw)
         response_time = datetime.now()
+
+        duration = (response_time - request_time).total_seconds()
+        print("duration", duration)
 
         try:
             parsed_url = urlparse(url)
-            config = partner_interface_config.get(parsed_url.netloc)
+            partner_config = partner_interface_config.get(parsed_url.netloc)
 
-            if config is None:
-                return response
+            partner_code = method_code = None
 
             try:
                 response_data = response.json()
             except ValueError:
                 code = -1
             else:
-                code = FuzzyGet(response_data, 'code').v
+                code = fuzzy_get_many(response_data, 'code', 'errorcode')
                 if code is None:
-                    code = FuzzyGet(response_data, 'errorcode').v
-                    if code is None:
-                        code = -1
+                    code = -1
 
-            this.metrics_partner_http.labels(
-                appid=this.appid,
-                application=this.syscode,
-                partner=config['partner'],
-                action_code=config['paths'].get(parsed_url.path, ''),
-                http_status=response.status_code,
-                code=code
-            ).observe((response_time - request_time).total_seconds() * 1000)
+            if partner_config is not None:
+                partner_code = partner_config['partner']
+                method_code = partner_config['paths'].get(parsed_url.path)
+                this.metrics_partner_http.labels(
+                    appid=this.appid,
+                    application=this.syscode,
+                    partner=partner_code,
+                    action_code=method_code or '',
+                    http_status=response.status_code,
+                    code=code
+                ).observe(duration * 1000)
+
+            if method_code is None:
+                method_code = FuzzyGet([headers, params, data, json], 'Method-Code').v
+
+            tcode = partner_code or get_tcode(parsed_url, headers)
+            status = 'success' if response.status_code < 400 and code == 0 else 'error'
+
+            this.external_calls_total.labels(
+                call_type='http',
+                tcode=tcode or '',
+                method_code=method_code or '',
+                status=status
+            ).inc()
+
+            this.external_call_duration_seconds.labels(
+                call_type='http',
+                tcode=tcode or '',
+                method_code=method_code or '',
+                status=status
+            ).observe(duration)
+
         except Exception:
             sys.stderr.write(
-                traceback.format_exc() + '\nAn exception occurred while '
-                'recording the metrics.'
+                traceback.format_exc() + '\nAn exception occurred while recording the metrics.'
             )
         finally:
             return response
@@ -310,6 +356,25 @@ class FuzzyGet(dict):
         if isinstance(data, (list, tuple)):
             return data.__class__(cls(v, key, root) for v in data)
         return cls
+
+
+def fuzzy_get_many(data, *keys):
+    for k in keys:
+        v = FuzzyGet(data, k).v
+        if v is not None:
+            return v
+
+
+def get_tcode(parsed_url, request_headers):
+    tcode = FuzzyGet(request_headers, 'T-Code').v
+    if tcode is None:
+        host_prefix = parsed_url.hostname.split('.')[0]
+        tcode = host_prefix if is_syscode(host_prefix) else None
+    return tcode and tcode.upper()
+
+
+def is_syscode(x):
+    return len(x) == 10 and x[0].isalpha() and x[1:].isdigit()
 
 
 partner_interface_config = {
