@@ -136,12 +136,12 @@ def __init__(
         this.external_calls_total = prometheus_client.Counter(
             name='external_calls_total',
             documentation='Total number of external calls',
-            labelnames=('call_type', 'tcode', 'method_code', 'status')
+            labelnames=('appid', 'application', 'call_type', 'tcode', 'method_code', 'status')
         )
         this.external_call_duration_seconds = prometheus_client.Histogram(
             name='external_call_duration_seconds',
             documentation='Duration of external calls in seconds',
-            labelnames=('call_type', 'tcode', 'method_code', 'status'),
+            labelnames=('appid', 'application', 'call_type', 'tcode', 'method_code', 'status'),
             buckets=tuple(v * 0.001 for v in external_metrics_buckets or default_buckets)
         )
 
@@ -157,10 +157,10 @@ def __init__(
 
 def start_prometheus_metrics_server(port):
     start = time.time()
-    while time.time() - start < 3:
+    while time.time() - start < 40:
         if hasattr(Flask, '__running__') or hasattr(WSGIServer, '__running__'):
             return
-        time.sleep(.01)
+        time.sleep(.2)
     prometheus_client.start_http_server(int(port))
 
 
@@ -289,6 +289,8 @@ def http_request_metrics(func):
             status = 'success' if response.status_code < 400 and code == 0 else 'error'
 
             this.external_calls_total.labels(
+                appid=this.appid,
+                application=this.syscode,
                 call_type='http',
                 tcode=tcode or '',
                 method_code=method_code or '',
@@ -296,6 +298,8 @@ def http_request_metrics(func):
             ).inc()
 
             this.external_call_duration_seconds.labels(
+                appid=this.appid,
+                application=this.syscode,
                 call_type='http',
                 tcode=tcode or '',
                 method_code=method_code or '',
